@@ -1,0 +1,296 @@
+create or replace database zomatodb;
+    
+create or replace schema zomatodb.external_stages;
+
+
+CREATE OR REPLACE STAGE aws_stage
+    URL='s3://khemubucket/'
+    CREDENTIALS=(AWS_KEY_ID='AKISFAQWWPG26SFSBI4' AWS_SECRET_KEY='zJrl+ZtAMySDSFNqTfkgRkKH9JzzcDFSDFPm7Q965M');
+
+desc stage aws_stage;
+
+list @aws_stage;
+
+create or replace database testing;
+
+create or replace table testing.public.zomato(
+  url STRING, 
+  address STRING, 
+  name STRING, 
+  online_order STRING, 
+  book_table STRING,
+  rate STRING, 
+  votes STRING, 
+  phone STRING, 
+  location STRING, 
+  rest_type STRING,
+  dish_liked STRING,
+  cuisines STRING,
+  "approx_cost(for two people)" int,
+  reviews_list STRING, menu_item STRING, 
+  "listed_in(type)" STRING, 
+  "listed_in(city)" STRING
+);
+
+
+select * from testing.public.zomato;
+
+copy into testing.public.zomato
+from @zomatodb.external_stages.aws_stage
+file_format = (
+  type = csv
+  field_delimiter = ','
+  skip_header = 1
+  null_if = ('NULL', 'null', '')
+  empty_field_as_null = true
+  FIELD_OPTIONALLY_ENCLOSED_BY = '"'
+)
+files = ('zomato.csv')
+ON_ERROR = 'CONTINUE';
+
+select * from testing.public.zomato;
+
+-- Restaurant Dimension
+CREATE OR REPLACE TABLE DimRestaurant (
+  restaurant_id INT AUTOINCREMENT PRIMARY KEY,
+  name STRING,
+  address STRING,
+  phone STRING,
+  url  STRING
+);
+
+-- Location Dimension
+CREATE OR REPLACE TABLE DimLocation (
+  location_id INT AUTOINCREMENT PRIMARY KEY,
+  location STRING,
+  city STRING
+);
+
+-- Cuisine Dimension
+CREATE OR REPLACE TABLE DimCuisine (
+  cuisine_id INT AUTOINCREMENT PRIMARY KEY,
+  cuisines STRING,
+  dish_liked STRING,
+  menu_item STRING
+);
+
+-- Service Dimension
+CREATE OR REPLACE TABLE DimService (
+  service_id INT AUTOINCREMENT PRIMARY KEY,
+  online_order STRING,
+  book_table STRING,
+  listed_type STRING
+);
+
+INSERT INTO DimRestaurant (name, address, phone, url)
+SELECT DISTINCT name, address, phone, url
+FROM testing.public.zomato;
+
+INSERT INTO DimLocation (location, city)
+SELECT DISTINCT location, "listed_in(city)"
+FROM testing.public.zomato;
+
+INSERT INTO DimCuisine (cuisines, dish_liked, menu_item)
+SELECT DISTINCT cuisines, dish_liked, menu_item
+FROM testing.public.zomato;
+
+INSERT INTO DimService (online_order, book_table, listed_type)
+SELECT DISTINCT online_order, book_table, "listed_in(type)"
+FROM testing.public.zomato;
+
+
+SHOW TABLES IN SCHEMA zomatodb.public;
+
+
+CREATE OR REPLACE TABLE FactZomato (
+  fact_id INT AUTOINCREMENT PRIMARY KEY,
+  restaurant_id INT,
+  location_id INT,
+  cuisine_id INT,
+  service_id INT,
+  cost_for_two INT,
+  rate STRING,
+  votes STRING,
+  FOREIGN KEY (restaurant_id) REFERENCES DimRestaurant(restaurant_id),
+  FOREIGN KEY (location_id) REFERENCES DimLocation(location_id),
+  FOREIGN KEY (cuisine_id) REFERENCES DimCuisine(cuisine_id),
+  FOREIGN KEY (service_id) REFERENCES DimService(service_id)
+);
+
+
+SHOW TABLES IN SCHEMA zomatodb.public;
+
+INSERT INTO FactZomato (
+  restaurant_id, location_id, cuisine_id, service_id,
+  cost_for_two, rate, votes
+)
+SELECT
+  r.restaurant_id,
+  l.location_id,
+  c.cuisine_id,
+  s.service_id,
+  z."approx_cost(for two people)",
+  z.rate,
+  z.votes
+FROM testing.public.zomato z
+JOIN DimRestaurant r ON z.name = r.name AND z.address = r.address AND z.phone = r.phone
+JOIN DimLocation l ON z.location = l.location AND z."listed_in(city)" = l.city
+JOIN DimCuisine c ON z.cuisines = c.cuisines AND z.dish_liked = c.dish_liked
+JOIN DimService s ON z.online_order = s.online_order AND z.book_table = s.book_table AND z."listed_in(type)" = s.listed_type;
+
+
+
+-- 1. Which cuisines are most popular among customers?
+SELECT c.cuisines, COUNT(f.fact_id) AS total_orders
+FROM FactZomato f
+JOIN DimCuisine c ON f.cuisine_id = c.cuisine_id
+GROUP BY c.cuisines
+ORDER BY total_orders DESC
+LIMIT 5;
+
+-- 2.count different cuisines in different row
+SELECT TRIM(value) AS cuisine, COUNT(*) AS count
+FROM (
+  SELECT value
+  FROM DimCuisine,
+       LATERAL FLATTEN(input => SPLIT(cuisines, ','))
+)
+GROUP BY cuisine
+ORDER BY count DESC;
+
+
+-- 3. Which location has the highest average cost for two?
+SELECT l.location, AVG(f.cost_for_two) AS avg_cost
+FROM FactZomato f
+JOIN DimLocation l ON f.location_id = l.location_id
+GROUP BY l.location
+ORDER BY avg_cost DESC
+LIMIT 5;
+
+-- 4. Which restaurants have the highest number of votes?
+SELECT r.name, MAX(TRY_TO_NUMBER(f.votes)) AS vote_count
+FROM FactZomato f
+JOIN DimRestaurant r ON f.restaurant_id = r.restaurant_id
+GROUP BY r.name
+ORDER BY vote_count DESC
+LIMIT 5;
+
+-- 5. Which restaurant types (rest_type) are most commonly offered, and how frequently?
+SELECT 
+  TRIM(value) AS restaurant_type, 
+  COUNT(*) AS count
+FROM (
+  SELECT value
+  FROM testing.public.zomato,
+       LATERAL FLATTEN(input => SPLIT(rest_type, ','))
+)
+GROUP BY restaurant_type
+ORDER BY count DESC;
+
+-- 6. Top cities by number of restaurants listed
+SELECT l.city, COUNT(DISTINCT f.restaurant_id) AS num_restaurants
+FROM FactZomato f
+JOIN DimLocation l ON f.location_id = l.location_id
+GROUP BY l.city
+ORDER BY num_restaurants DESC
+LIMIT 5;
+
+-- 7. What types of services (e.g., table booking) are most common?
+SELECT s.book_table, COUNT(*) AS count
+FROM FactZomato f
+JOIN DimService s ON f.service_id = s.service_id
+GROUP BY s.book_table;
+
+-- 8. Which cuisines are the most popular based on the number of restaurants offering them?
+SELECT 
+  TRIM(value) AS cuisine,
+  COUNT(*) AS total_restaurants
+FROM testing.public.zomato,
+     LATERAL FLATTEN(input => SPLIT(cuisines, ','))
+WHERE cuisines IS NOT NULL
+GROUP BY cuisine
+ORDER BY total_restaurants DESC;
+
+
+-- 9. Which dishes are most liked across the dataset?
+SELECT dish_liked, COUNT(*) AS count
+FROM DimCuisine
+WHERE dish_liked IS NOT NULL AND dish_liked <> ''
+GROUP BY dish_liked
+ORDER BY count DESC
+LIMIT 5;
+
+
+-- 10. Top 10 Highest Rated Restaurants
+SELECT DISTINCT r.name, f.rate
+FROM FactZomato f
+JOIN DimRestaurant r ON f.restaurant_id = r.restaurant_id
+WHERE f.rate IS NOT NULL AND f.rate NOT IN ('NEW', '') 
+ORDER BY TRY_TO_NUMERIC(SPLIT_PART(f.rate, '/', 1)) DESC 
+LIMIT 10;
+
+-- 11. Online Order Availability by City
+SELECT l.city, s.online_order, COUNT(*) AS restaurant_count
+FROM FactZomato f
+JOIN DimLocation l ON f.location_id = l.location_id
+JOIN DimService s ON f.service_id = s.service_id
+GROUP BY l.city, s.online_order
+ORDER BY l.city;
+
+-- 12. Restaurant Count by Phone Availability
+SELECT 
+  CASE 
+    WHEN r.phone IS NULL THEN 'No Phone Listed' 
+    ELSE 'Phone Listed' 
+  END AS phone_status,
+  COUNT(*) AS total
+FROM FactZomato f
+JOIN DimRestaurant r ON f.restaurant_id = r.restaurant_id
+GROUP BY phone_status;
+
+
+-- 13. Book Table vs Not Book Table – Count
+SELECT s.book_table, COUNT(*) AS count
+FROM FactZomato f
+JOIN DimService s ON f.service_id = s.service_id
+GROUP BY s.book_table;
+
+-- 14. Number of Restaurants by Location
+SELECT l.location, COUNT(*) AS count
+FROM FactZomato f
+JOIN DimLocation l ON f.location_id = l.location_id
+GROUP BY l.location
+ORDER BY count DESC
+LIMIT 10;
+
+-- 15. Service Type Distribution
+SELECT s.listed_type, COUNT(*) AS count
+FROM FactZomato f
+JOIN DimService s ON f.service_id = s.service_id
+GROUP BY s.listed_type
+ORDER BY count DESC;
+
+-- 16. Restaurants Offering Both Online Order and Table Booking
+SELECT COUNT(*) AS both_services_count
+FROM FactZomato f
+JOIN DimService s ON f.service_id = s.service_id
+WHERE s.online_order = 'Yes' AND s.book_table = 'Yes';
+
+-- 17. How are restaurants distributed based on their service offerings: 
+-- online ordering, table booking, both, or none?
+SELECT
+  CASE
+    WHEN s.online_order = 'Yes' AND s.book_table = 'Yes' THEN 'Both Services'
+    WHEN s.online_order = 'Yes' AND s.book_table = 'No' THEN 'Online Services only'
+    WHEN s.online_order = 'No' AND s.book_table = 'Yes' THEN 'Book table Services only'
+    WHEN s.online_order = 'No' AND s.book_table = 'No' THEN 'No Services'
+    ELSE 'Other Combination'
+  END AS service_type,
+  COUNT(*) AS restaurant_count
+FROM FactZomato f
+JOIN DimService s ON f.service_id = s.service_id
+GROUP BY service_type
+ORDER BY restaurant_count DESC;
+
+
+

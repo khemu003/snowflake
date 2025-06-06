@@ -1,0 +1,33 @@
+CREATE OR REPLACE STAGE zomato_export_stage
+  URL='s3://khemubucket/zomato_exports/'
+  CREDENTIALS=(AWS_KEY_ID='AKIDFGDGDFP7XRWPG26BI4',AWS_SECRET_KEY='zJrl+ZtAMyNqo7FDVE4VEVRkKH9JzzcPm7Q965M');
+
+-- Export DimRestaurant
+COPY INTO @zomato_export_stage/DimRestaurant.csv
+FROM DimRestaurant
+FILE_FORMAT = (TYPE = CSV COMPRESSION = NONE SKIP_HEADER = 1)
+OVERWRITE = TRUE;
+
+-- Export DimService
+COPY INTO @zomato_export_stage/DimService.csv
+FROM DimService
+FILE_FORMAT = (TYPE = CSV COMPRESSION = NONE SKIP_HEADER = 1)
+OVERWRITE = TRUE;
+
+-- Export DimLocation
+COPY INTO @zomato_export_stage/DimLocation.csv
+FROM DimLocation
+FILE_FORMAT = (TYPE = CSV COMPRESSION = NONE SKIP_HEADER = 1)
+OVERWRITE = TRUE;
+
+-- Export DimCuisine
+COPY INTO @zomato_export_stage/DimCuisine.csv
+FROM DimCuisine
+FILE_FORMAT = (TYPE = CSV COMPRESSION = NONE SKIP_HEADER = 1)
+OVERWRITE = TRUE;
+
+-- Export FactZomato
+COPY INTO @zomato_export_stage/FactZomato.csv
+FROM FactZomato
+FILE_FORMAT = (TYPE = CSV COMPRESSION = NONE SKIP_HEADER = 1)
+OVERWRITE = TRUE;
